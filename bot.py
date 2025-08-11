@@ -5225,11 +5225,7 @@ def ytdlp_hook(d):
     logger.info(d['status'])
 
 #####################################################################################
-_format = {"ID": '0', "timestamp": math.floor(time.time())}
-db.child("bot").child("tgytdlp_bot").child("users").child("0").set(_format)
-db.child("bot").child("tgytdlp_bot").child("blocked_users").child("0").set(_format)
-db.child("bot").child("tgytdlp_bot").child("unblocked_users").child("0").set(_format)
-logger.info("db created")
+
 starting_point.append(time.time())
 logger.info("Bot started")
 
