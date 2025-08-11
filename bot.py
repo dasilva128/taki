@@ -1,4 +1,4 @@
-
+# Version 3.1.0 # save firebase-cache localy to prevent
 import glob
 from sdnotify import SystemdNotifier
 from datetime import datetime, timedelta
@@ -70,45 +70,6 @@ threading.Thread(target=watchdog_loop, daemon=True).start()
 notifier.notify("READY=1")
 logger.info("[Watchdog] Sent READY=1")
 
-# Global variable for local cache Firebase
-firebase_cache = {}
-
-# Global variable to monitor the state of automatic loading cache
-auto_cache_enabled = getattr(Config, 'AUTO_CACHE_RELOAD_ENABLED', True)
-auto_cache_thread = None
-
-def load_firebase_cache():
-    """Load local Firebase cache from JSON file."""
-    global firebase_cache
-    try:
-        cache_file = getattr(Config, 'FIREBASE_CACHE_FILE', 'firebase_cache.json')
-        if os.path.exists(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as f:
-                firebase_cache = json.load(f)
-            print(f"✅ Firebase cache loaded: {len(firebase_cache)} root nodes")
-        else:
-            print(f"⚠️ Firebase cache file not found, starting with empty cache: {cache_file}")
-            firebase_cache = {}
-    except Exception as e:
-        print(f"❌ Failed to load firebase cache: {e}")
-        firebase_cache = {}
-
-def reload_firebase_cache():
-    """Reloading the local Firebase cache from JSON file"""
-    global firebase_cache
-    try:
-        cache_file = getattr(Config, 'FIREBASE_CACHE_FILE', 'firebase_cache.json')
-        if os.path.exists(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as f:
-                firebase_cache = json.load(f)
-            print(f"✅ Firebase cache reloaded: {len(firebase_cache)} root nodes")
-            return True
-        else:
-            print(f"⚠️ Firebase cache file not found: {cache_file}")
-            return False
-    except Exception as e:
-        print(f"❌ Failed to reload firebase cache: {e}")
-        return False
 
 
 def get_next_reload_time(interval_hours: int) -> datetime:
@@ -126,63 +87,6 @@ def get_next_reload_time(interval_hours: int) -> datetime:
     # Next = midnight + (intervals_passed + 1) * step
     return midnight + timedelta(seconds=(intervals_passed + 1) * interval_seconds)
 
-def auto_reload_firebase_cache():
-    """A stream that every n clock restarts a local cache."""
-    global auto_cache_enabled
-
-    interval_hours = getattr(Config, 'RELOAD_CACHE_EVERY', 4)
-    while auto_cache_enabled:
-        next_exec = get_next_reload_time(interval_hours)
-        now = datetime.now()
-        wait_seconds = (next_exec - now).total_seconds()
-        print(
-            f"⏳ Waiting until {next_exec.strftime('%Y-%m-%d %H:%M:%S')} "
-            f"to reload Firebase cache ({wait_seconds/3600:.2f} hours)"
-        )
-        # "Smart" Sleep
-        end_time = time.time() + wait_seconds
-        while auto_cache_enabled and time.time() < end_time:
-            time.sleep(min(1, end_time - time.time()))
-        if not auto_cache_enabled:
-            print("🛑 Auto Firebase cache reloader stopped by admin")
-            return
-        # Run the reboot
-        try:
-            user_id = (
-                Config.ADMIN[0]
-                if isinstance(Config.ADMIN, (list, tuple))
-                else Config.ADMIN
-            )
-            print(f"🔄 Triggering /reload_cache as admin (user_id={user_id})")
-            msg = fake_message("/reload_cache", user_id)
-            reload_firebase_cache_command(app, msg)
-        except Exception as e:
-            print(f"❌ Error running auto reload_cache: {e}")
-            import traceback; traceback.print_exc()
-
-
-def toggle_auto_cache_reloader():
-    """Switchs the transload mode."""
-    global auto_cache_enabled
-    auto_cache_enabled = not auto_cache_enabled
-    if auto_cache_enabled:
-        start_auto_cache_reloader()
-    else:
-        stop_auto_cache_reloader()
-    return auto_cache_enabled
-
-# We load the cache when importing module
-load_firebase_cache()
-
-
-def log_firebase_access_attempt(path_parts, success=True):
-    """
-    Logs attempts to turn to a local cache (to track the remaining .get () calls)
-    """
-    # Show the path in JSON format for local cache
-    path_str = ' -> '.join(path_parts)  # For example: "bot -> video_cache -> playlists -> url_hash -> quality"
-    status = "SUCCESS" if success else "MISS"
-    print(f"🔥 Firebase access attempt: {path_str} -> {status}")
 
 def ensure_utf8_srt(srt_path):
     """
@@ -1227,86 +1131,6 @@ def check_disk_space(path, required_bytes):
         return True
 
 
-# Initialize Firebase
-firebase = pyrebase.initialize_app(Config.FIREBASE_CONF)
-auth = firebase.auth()
-
-# Authenticate user
-try:
-    user = auth.sign_in_with_email_and_password(Config.FIREBASE_USER, Config.FIREBASE_PASSWORD)
-    logger.info("✅ Firebase signed in")
-except Exception as e:
-    logger.error(f"❌ Firebase authentication error: {e}")
-    raise
-
-# Extract idToken
-id_token = user.get("idToken")
-if not id_token:
-    raise Exception("idToken is missing")
-
-# Setup database with authentication
-base_db = firebase.database()
-
-class AuthedDB:
-    def __init__(self, db, token):
-        self.db = db
-        self.token = token
-
-    def child(self, *path_parts):
-        db_ref = self.db
-        for part in path_parts:
-            db_ref = db_ref.child(part)
-        return AuthedDB(db_ref, self.token)
-
-    def set(self, data, *args, **kwargs):
-        return self.db.set(data, self.token, *args, **kwargs)
-
-    def get(self, *args, **kwargs):
-        return self.db.get(self.token, *args, **kwargs)
-
-    def push(self, data, *args, **kwargs):
-        return self.db.push(data, self.token, *args, **kwargs)
-
-    def update(self, data, *args, **kwargs):
-        return self.db.update(data, self.token, *args, **kwargs)
-
-    def remove(self, *args, **kwargs):
-        return self.db.remove(self.token, *args, **kwargs)
-	    
-
-# Create authed db wrapper
-db = AuthedDB(base_db, id_token)
-
-# Optional write to verify it's working
-try:
-    db_path = Config.BOT_DB_PATH.rstrip("/")
-    payload = {"ID": "0", "timestamp": math.floor(time.time())}
-    db.child(f"{db_path}/users/0").set(payload)
-    logger.info("✅ Initial Firebase write successful")
-except Exception as e:
-    logger.error(f"❌ Error writing to Firebase: {e}")
-    raise
-
-# Background thread to refresh idToken every 50 minutes
-def token_refresher():
-    global db, user
-    while True:
-        time.sleep(3000)  # 50 minutes
-        try:
-            new_user = auth.refresh(user["refreshToken"])
-            new_id_token = new_user["idToken"]
-            db.token = new_id_token
-            user = new_user
-            logger.info("🔁 Firebase token refreshed")
-        except Exception as e:
-            logger.error(f"❌ Token refresh error: {e}")
-
-token_thread = threading.Thread(target=token_refresher, daemon=True)
-token_thread.start()
-
-# ###############################################################################################
-
-# Pyrogram App Initialization
 app = Client(
     "magic",
     api_id=Config.API_ID,
@@ -1319,62 +1143,6 @@ app = Client(
 # #############################################################################################################################
 
 @app.on_message(filters.command("reload_cache") & filters.private)
-def reload_firebase_cache_command(app, message):
-    """The processor of command for rebooting the local cache Firebase"""
-    if int(message.chat.id) not in Config.ADMIN:
-        send_to_user(message, "❌ Access denied. Admin only.")
-        return
-    try:
-        # 1. First, start download_firebase.py along the way from the confusion
-        script_path = getattr(Config, "DOWNLOAD_FIREBASE_SCRIPT_PATH", "download_firebase.py")
-        send_to_user(message, f"⏳ Downloading fresh Firebase dump using {script_path} ...")
-        result = subprocess.run([sys.executable, script_path], capture_output=True, text=True)
-        if result.returncode != 0:
-            send_to_user(message, f"❌ Error running {script_path}:\n{result.stdout}\n{result.stderr}")
-            send_to_logger(message, f"Error running {script_path}: {result.stdout}\n{result.stderr}")
-            return
-        # 2. Now load the cache
-        success = reload_firebase_cache()
-        if success:
-            send_to_user(message, "✅ Firebase cache reloaded successfully!")
-            send_to_logger(message, "Firebase cache reloaded by admin.")
-        else:
-            cache_file = getattr(Config, 'FIREBASE_CACHE_FILE', 'firebase_cache.json')
-            send_to_user(message, f"❌ Failed to reload Firebase cache. Check if {cache_file} exists.")
-    except Exception as e:
-        send_to_user(message, f"❌ Error reloading cache: {str(e)}")
-        send_to_logger(message, f"Error reloading Firebase cache: {str(e)}")
-
-
-def auto_cache_command(app, message):
-    """Command handler to control the automatic loading of the Firebase cache."""
-    if int(message.chat.id) not in Config.ADMIN:
-        send_to_user(message, "❌ Access denied. Admin only.")
-        return
-
-    new_state = toggle_auto_cache_reloader()
-    interval = getattr(Config, 'RELOAD_CACHE_EVERY', 4)
-
-    if new_state:
-        next_exec = get_next_reload_time(interval)
-        delta_min = int((next_exec - datetime.now()).total_seconds() // 60)
-        send_to_user(
-            message,
-            "🔄 Auto Firebase cache reloading started!\n\n"
-            f"📊 Status: ✅ ENABLED\n"
-            f"⏰ Schedule: every {interval} hours from 00:00\n"
-            f"🕒 Next reload: {next_exec.strftime('%H:%M')} (in {delta_min} minutes)"
-        )
-        send_to_logger(message, f"Auto reload started; next at {next_exec}")
-    else:
-        send_to_user(
-            message,
-            "🛑 Auto Firebase cache reloading stopped!\n\n"
-            "📊 Status: ❌ DISABLED\n"
-            "💡 Use /auto_cache again to re-enable"
-        )
-        send_to_logger(message, "Auto reload stopped by admin.")
-        
 
 @app.on_callback_query(filters.regex(r"^subs_lang_close\|"))
 def subs_lang_close_callback(app, callback_query):
@@ -2077,10 +1845,7 @@ def url_distractor(app, message):
             return
 
         # /reload_cache Command - Reload cache for URL
-        if Config.RELOAD_CACHE_COMMAND in text:
-            reload_firebase_cache_command(app, message)
-            return
-
+        
         # /auto_cache Command - Toggle automatic cache reloading
         if Config.AUTO_CACHE_COMMAND in text:
             auto_cache_command(app, message)
